@@ -21,6 +21,7 @@ const geminiRoutes = require('./routes/geminiRoutes')
 const openaiGeminiRoutes = require('./routes/openaiGeminiRoutes')
 const standardGeminiRoutes = require('./routes/standardGeminiRoutes')
 const openaiClaudeRoutes = require('./routes/openaiClaudeRoutes')
+const claudeOpenaiRoutes = require('./routes/claudeOpenaiRoutes')
 const openaiRoutes = require('./routes/openaiRoutes')
 const droidRoutes = require('./routes/droidRoutes')
 const userRoutes = require('./routes/userRoutes')
@@ -262,6 +263,7 @@ class Application {
       this.app.use('/gemini', geminiRoutes) // 保留原有路径以保持向后兼容
       this.app.use('/openai/gemini', openaiGeminiRoutes)
       this.app.use('/openai/claude', openaiClaudeRoutes)
+      this.app.use('/claude/openai', claudeOpenaiRoutes)
       this.app.use('/openai', openaiRoutes)
       // Droid 路由：支持多种 Factory.ai 端点
       this.app.use('/droid', droidRoutes) // Droid (Factory.ai) API 转发
