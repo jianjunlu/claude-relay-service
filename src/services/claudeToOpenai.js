@@ -14,6 +14,9 @@ class ClaudeToOpenAIConverter {
       tool_calls: 'tool_use',
       content_filter: 'end_turn'
     }
+
+    // 记录每个会话的流式状态，保证多请求互不干扰
+    this._streamStates = new Map()
   }
 
   /**
@@ -92,6 +95,7 @@ class ClaudeToOpenAIConverter {
       return ''
     }
 
+    const sessionKey = sessionId || 'default'
     const lines = chunk.split('\n')
     const convertedEvents = []
 
@@ -104,6 +108,7 @@ class ClaudeToOpenAIConverter {
           convertedEvents.push('event: message_stop')
           convertedEvents.push('data: {"type":"message_stop"}')
           convertedEvents.push('')
+          this._resetStreamState(sessionKey)
           continue
         }
 
@@ -122,6 +127,34 @@ class ClaudeToOpenAIConverter {
     }
 
     return convertedEvents.length > 0 ? `${convertedEvents.join('\n')}\n` : ''
+  }
+
+  /**
+   * 获取或初始化流式状态
+   */
+  _getStreamState(sessionId) {
+    const key = sessionId || 'default'
+    if (!this._streamStates.has(key)) {
+      this._streamStates.set(key, {
+        messageStarted: false,
+        textBlockStarted: false,
+        toolBlocks: new Map()
+      })
+    }
+
+    const state = this._streamStates.get(key)
+    if (!state.toolBlocks || typeof state.toolBlocks.clear !== 'function') {
+      state.toolBlocks = new Map()
+    }
+    return state
+  }
+
+  /**
+   * 重置流式状态
+   */
+  _resetStreamState(sessionId) {
+    const key = sessionId || 'default'
+    this._streamStates.delete(key)
   }
 
   /**
@@ -308,18 +341,21 @@ class ClaudeToOpenAIConverter {
    */
   _convertStreamEvent(openaiChunk, sessionId) {
     const events = []
-    const { choices } = openaiChunk
+    const state = this._getStreamState(sessionId)
+    const choices = Array.isArray(openaiChunk.choices) ? openaiChunk.choices : []
 
-    if (!choices || choices.length === 0) {
+    if (choices.length === 0) {
       return events
     }
 
-    const choice = choices[0]
-    const { delta } = choice
+    const choice = choices[0] || {}
+    const delta = choice.delta || {}
 
-    // 检查是否是第一个chunk（包含role）
-    if (delta.role) {
-      // message_start 事件
+    if (delta.role && !state.messageStarted) {
+      state.messageStarted = true
+      state.textBlockStarted = false
+      state.toolBlocks.clear()
+
       events.push('event: message_start')
       events.push(
         `data: ${JSON.stringify({
@@ -339,10 +375,20 @@ class ClaudeToOpenAIConverter {
       events.push('')
     }
 
-    // 处理内容增量
-    if (delta.content) {
-      // content_block_start（首次）
-      if (!this._lastContentBlockStarted) {
+    const contentParts = Array.isArray(delta.content)
+      ? delta.content
+      : delta.content !== undefined && delta.content !== null
+        ? [{ type: 'text', text: delta.content }]
+        : []
+
+    for (const part of contentParts) {
+      const text = typeof part === 'string' ? part : typeof part?.text === 'string' ? part.text : ''
+
+      if (!text) {
+        continue
+      }
+
+      if (!state.textBlockStarted) {
         events.push('event: content_block_start')
         events.push(
           `data: ${JSON.stringify({
@@ -355,10 +401,9 @@ class ClaudeToOpenAIConverter {
           })}`
         )
         events.push('')
-        this._lastContentBlockStarted = true
+        state.textBlockStarted = true
       }
 
-      // content_block_delta
       events.push('event: content_block_delta')
       events.push(
         `data: ${JSON.stringify({
@@ -366,20 +411,27 @@ class ClaudeToOpenAIConverter {
           index: 0,
           delta: {
             type: 'text_delta',
-            text: delta.content
+            text
           }
         })}`
       )
       events.push('')
     }
 
-    // 处理工具调用
-    if (delta.tool_calls) {
+    if (Array.isArray(delta.tool_calls)) {
       for (const toolCall of delta.tool_calls) {
-        const index = toolCall.index || 0
+        const index = toolCall.index ?? 0
+        let toolState = state.toolBlocks.get(index)
+        if (!toolState) {
+          toolState = { started: false }
+          state.toolBlocks.set(index, toolState)
+        }
 
-        if (toolCall.id) {
-          // tool_use 开始
+        if (!toolState.started && (toolCall.id || toolCall.function?.name)) {
+          toolState.started = true
+          toolState.id = toolCall.id || `tool_${this._generateId()}`
+          toolState.name = toolCall.function?.name || ''
+
           events.push('event: content_block_start')
           events.push(
             `data: ${JSON.stringify({
@@ -387,8 +439,8 @@ class ClaudeToOpenAIConverter {
               index,
               content_block: {
                 type: 'tool_use',
-                id: toolCall.id,
-                name: toolCall.function?.name || '',
+                id: toolState.id,
+                name: toolState.name,
                 input: {}
               }
             })}`
@@ -396,8 +448,7 @@ class ClaudeToOpenAIConverter {
           events.push('')
         }
 
-        if (toolCall.function?.arguments) {
-          // tool_use 参数增量
+        if (toolState.started && toolCall.function?.arguments) {
           events.push('event: content_block_delta')
           events.push(
             `data: ${JSON.stringify({
@@ -414,10 +465,8 @@ class ClaudeToOpenAIConverter {
       }
     }
 
-    // 处理结束
     if (choice.finish_reason) {
-      // content_block_stop
-      if (this._lastContentBlockStarted || delta.tool_calls) {
+      if (state.textBlockStarted) {
         events.push('event: content_block_stop')
         events.push(
           `data: ${JSON.stringify({
@@ -426,24 +475,38 @@ class ClaudeToOpenAIConverter {
           })}`
         )
         events.push('')
+        state.textBlockStarted = false
       }
 
-      // message_delta
-      events.push('event: message_delta')
-      events.push(
-        `data: ${JSON.stringify({
-          type: 'message_delta',
-          delta: {
-            stop_reason: this._mapStopReason(choice.finish_reason),
-            stop_sequence: null
-          },
-          usage: openaiChunk.usage ? this._convertUsage(openaiChunk.usage) : undefined
-        })}`
-      )
-      events.push('')
+      if (state.toolBlocks.size > 0) {
+        for (const [index] of state.toolBlocks) {
+          events.push('event: content_block_stop')
+          events.push(
+            `data: ${JSON.stringify({
+              type: 'content_block_stop',
+              index
+            })}`
+          )
+          events.push('')
+        }
+        state.toolBlocks.clear()
+      }
 
-      // 重置状态
-      this._lastContentBlockStarted = false
+      const messageDelta = {
+        type: 'message_delta',
+        delta: {
+          stop_reason: this._mapStopReason(choice.finish_reason),
+          stop_sequence: null
+        }
+      }
+
+      if (openaiChunk.usage) {
+        messageDelta.usage = this._convertUsage(openaiChunk.usage)
+      }
+
+      events.push('event: message_delta')
+      events.push(`data: ${JSON.stringify(messageDelta)}`)
+      events.push('')
     }
 
     return events
