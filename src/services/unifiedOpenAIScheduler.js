@@ -343,7 +343,8 @@ class UnifiedOpenAIScheduler {
 
       return {
         accountId: selectedAccount.accountId,
-        accountType: selectedAccount.accountType
+        accountType: selectedAccount.accountType,
+        accountData: selectedAccount
       }
     } catch (error) {
       logger.error('❌ Failed to select account for API key:', error)

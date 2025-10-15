@@ -23,12 +23,12 @@ class ClaudeToOpenAIConverter {
    */
   convertRequest(claudeRequest) {
     const openaiRequest = {
-      model: this._mapClaudeModelToOpenAI(claudeRequest.model),
+      model: 'claude-4.5', //this._mapClaudeModelToOpenAI(claudeRequest.model),
       messages: this._convertMessages(claudeRequest),
       max_tokens: claudeRequest.max_tokens,
       temperature: claudeRequest.temperature,
       top_p: claudeRequest.top_p,
-      stream: claudeRequest.stream || false
+      stream: true //claudeRequest.stream || false
     }
 
     // 处理停止序列
@@ -60,7 +60,7 @@ class ClaudeToOpenAIConverter {
    */
   convertResponse(openaiResponse) {
     const choice = openaiResponse.choices[0]
-    const message = choice.message
+    const { message } = choice
 
     const claudeResponse = {
       id: `msg_${this._generateId()}`,
@@ -98,7 +98,7 @@ class ClaudeToOpenAIConverter {
     for (const line of lines) {
       if (line.startsWith('data: ')) {
         const data = line.substring(6)
-        
+
         if (data === '[DONE]') {
           // OpenAI 的 [DONE] 转换为 Claude 的 message_stop
           convertedEvents.push('event: message_stop')
@@ -110,7 +110,7 @@ class ClaudeToOpenAIConverter {
         try {
           const openaiChunk = JSON.parse(data)
           const claudeEvents = this._convertStreamEvent(openaiChunk, sessionId)
-          
+
           if (claudeEvents && claudeEvents.length > 0) {
             convertedEvents.push(...claudeEvents)
           }
@@ -121,7 +121,7 @@ class ClaudeToOpenAIConverter {
       }
     }
 
-    return convertedEvents.length > 0 ? convertedEvents.join('\n') + '\n' : ''
+    return convertedEvents.length > 0 ? `${convertedEvents.join('\n')}\n` : ''
   }
 
   /**
@@ -202,9 +202,7 @@ class ClaudeToOpenAIConverter {
         return content
           .map((item) => {
             if (item.type === 'tool_result') {
-              return typeof item.content === 'string'
-                ? item.content
-                : JSON.stringify(item.content)
+              return typeof item.content === 'string' ? item.content : JSON.stringify(item.content)
             }
             return item.text || ''
           })
@@ -455,9 +453,7 @@ class ClaudeToOpenAIConverter {
    * 生成随机 ID
    */
   _generateId() {
-    return (
-      Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15)
-    )
+    return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15)
   }
 }
 

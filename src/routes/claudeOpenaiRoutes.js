@@ -10,6 +10,8 @@ const { authenticateApiKey } = require('../middleware/auth')
 const claudeToOpenai = require('../services/claudeToOpenai')
 const apiKeyService = require('../services/apiKeyService')
 const unifiedOpenAIScheduler = require('../services/unifiedOpenAIScheduler')
+const openaiAccountService = require('../services/openaiAccountService')
+const openaiResponsesAccountService = require('../services/openaiResponsesAccountService')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const https = require('https')
 const http = require('http')
@@ -45,8 +47,12 @@ function queueRateLimitUpdate(rateLimitInfo, usageSummary, model, context = '') 
 // 🔧 发送请求到 OpenAI API
 async function sendToOpenAI(openaiRequest, accountData, isStream = false) {
   return new Promise((resolve, reject) => {
-    const apiUrl = accountData.apiUrl || 'https://api.openai.com'
-    const url = new URL(`${apiUrl}/v1/chat/completions`)
+    // OpenAI Responses 账户使用 baseApi 字段，标准 OpenAI 账户使用 apiUrl 字段
+    const apiUrl = accountData.baseApi || accountData.apiUrl || 'https://api.openai.com'
+    const url = new URL(`${apiUrl}/chat/completions`)
+    logger.info(
+      `🌐 OpenAI API URL: ${url.toString()}, agent: ${accountData.userAgent}, apikey: ${accountData.apiKey}`
+    )
 
     const requestOptions = {
       hostname: url.hostname,
@@ -56,7 +62,7 @@ async function sendToOpenAI(openaiRequest, accountData, isStream = false) {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${accountData.apiKey}`,
-        'User-Agent': 'Claude-OpenAI-Relay/1.0'
+        'User-Agent': accountData.userAgent || 'crs/1.0'
       }
     }
 
@@ -149,8 +155,35 @@ async function handleMessagesRequest(req, res, apiKeyData) {
       })
     }
 
-    const { account: accountData, accountId } = accountSelection
+    const { accountId, accountType } = accountSelection
+    let { accountData } = accountSelection
 
+    if (!accountData || accountData.apiKey === '***') {
+      try {
+        if (accountType === 'openai-responses') {
+          accountData = await openaiResponsesAccountService.getAccount(accountId)
+        } else if (accountType === 'openai') {
+          accountData = await openaiAccountService.getAccount(accountId)
+        }
+      } catch (fetchError) {
+        logger.error('❌ Failed to load OpenAI account details:', fetchError)
+        accountData = null
+      }
+    }
+
+    if (!accountData || !accountData.apiKey || accountData.apiKey === '***') {
+      logger.error('❌ OpenAI account data is invalid or missing API key', {
+        accountId,
+        accountType
+      })
+      return res.status(503).json({
+        type: 'error',
+        error: {
+          type: 'configuration_error',
+          message: 'Selected OpenAI account is misconfigured'
+        }
+      })
+    }
     // 处理流式请求
     if (openaiRequest.stream) {
       logger.info(`🌊 Processing Claude-OpenAI stream request for model: ${req.body.model}`)
@@ -174,7 +207,7 @@ async function handleMessagesRequest(req, res, apiKeyData) {
 
         openaiStream.on('data', (chunk) => {
           buffer += chunk.toString()
-
+          logger.info(`🔄 Received OpenAI stream chunk: ${buffer}`)
           // 处理完整的 SSE 消息
           const lines = buffer.split('\n\n')
           buffer = lines.pop() || '' // 保留不完整的消息
@@ -190,7 +223,7 @@ async function handleMessagesRequest(req, res, apiKeyData) {
                   const match = line.match(/"usage":\s*{[^}]+}/)
                   if (match) {
                     const usageJson = `{${match[0]}}`
-                    const usage = JSON.parse(usageJson).usage
+                    const { usage } = JSON.parse(usageJson)
                     if (usage) {
                       totalInputTokens = usage.prompt_tokens || 0
                       totalOutputTokens = usage.completion_tokens || 0
@@ -199,6 +232,7 @@ async function handleMessagesRequest(req, res, apiKeyData) {
                 }
               } catch (e) {
                 // 忽略解析错误
+                logger.warn('⚠️ Failed to parse usage from stream chunk:', e)
               }
 
               if (claudeChunk) {
