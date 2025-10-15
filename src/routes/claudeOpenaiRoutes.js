@@ -50,9 +50,6 @@ async function sendToOpenAI(openaiRequest, accountData, isStream = false) {
     // OpenAI Responses 账户使用 baseApi 字段，标准 OpenAI 账户使用 apiUrl 字段
     const apiUrl = accountData.baseApi || accountData.apiUrl || 'https://api.openai.com'
     const url = new URL(`${apiUrl}/chat/completions`)
-    logger.info(
-      `🌐 OpenAI API URL: ${url.toString()}, agent: ${accountData.userAgent}, apikey: ${accountData.apiKey}`
-    )
 
     const requestOptions = {
       hostname: url.hostname,
@@ -207,7 +204,6 @@ async function handleMessagesRequest(req, res, apiKeyData) {
 
         openaiStream.on('data', (chunk) => {
           buffer += chunk.toString()
-          logger.info(`🔄 Received OpenAI stream chunk: ${buffer}`)
           // 处理完整的 SSE 消息
           const lines = buffer.split('\n\n')
           buffer = lines.pop() || '' // 保留不完整的消息
@@ -220,19 +216,18 @@ async function handleMessagesRequest(req, res, apiKeyData) {
               // 尝试提取 usage 信息
               try {
                 if (line.includes('"usage"')) {
-                  const match = line.match(/"usage":\s*{[^}]+}/)
-                  if (match) {
-                    const usageJson = `{${match[0]}}`
-                    const { usage } = JSON.parse(usageJson)
-                    if (usage) {
-                      totalInputTokens = usage.prompt_tokens || 0
-                      totalOutputTokens = usage.completion_tokens || 0
+                  // 尝试从完整的 data 行中提取 usage 对象
+                  const dataMatch = line.match(/data:\s*({.+})/)
+                  if (dataMatch) {
+                    const chunkData = JSON.parse(dataMatch[1])
+                    if (chunkData.usage) {
+                      totalInputTokens = chunkData.usage.prompt_tokens || 0
+                      totalOutputTokens = chunkData.usage.completion_tokens || 0
                     }
                   }
                 }
               } catch (e) {
-                // 忽略解析错误
-                logger.warn('⚠️ Failed to parse usage from stream chunk:', e)
+                // 忽略解析错误，不打印日志避免噪音
               }
 
               if (claudeChunk) {
