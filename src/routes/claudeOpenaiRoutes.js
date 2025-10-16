@@ -97,8 +97,7 @@ async function sendToOpenAI(openaiRequest, accountData, isStream = false) {
       return response.data
     }
 
-    const body =
-      typeof response.data === 'string' ? response.data : JSON.stringify(response.data)
+    const body = typeof response.data === 'string' ? response.data : JSON.stringify(response.data)
 
     return {
       statusCode: response.status,
@@ -265,7 +264,7 @@ async function handleMessagesRequest(req, res, apiKeyData) {
           }
         })
 
-        openaiStream.on('end', () => {
+        openaiStream.on('end', async () => {
           // 确保发送 message_stop 事件
           res.write('event: message_stop\n')
           res.write('data: {"type":"message_stop"}\n\n')
@@ -297,6 +296,15 @@ async function handleMessagesRequest(req, res, apiKeyData) {
             )
           }
 
+          // 请求成功，检查并移除限流状态
+          const isRateLimited = await unifiedOpenAIScheduler.isAccountRateLimited(accountId)
+          if (isRateLimited) {
+            logger.info(
+              `✅ Removing rate limit for OpenAI account ${accountId} after successful Claude-OpenAI stream`
+            )
+            await unifiedOpenAIScheduler.removeAccountRateLimit(accountId, accountType)
+          }
+
           const duration = Date.now() - startTime
           logger.info(`✅ Claude-OpenAI stream request completed in ${duration}ms`)
         })
@@ -320,6 +328,68 @@ async function handleMessagesRequest(req, res, apiKeyData) {
           error: {
             type: 'api_error',
             message: 'Failed to connect to OpenAI API'
+          }
+        }
+
+        // 处理 429 限流错误
+        if (status === 429) {
+          logger.warn(
+            `🚫 Rate limit detected for OpenAI account ${accountId} (Claude-OpenAI stream)`
+          )
+
+          // 解析响应体中的限流信息
+          let resetsInSeconds = null
+          let errorData = null
+
+          try {
+            if (error.body) {
+              errorData = JSON.parse(error.body)
+
+              // 解析重置时间 - 支持多种格式
+              if (errorData.msg && typeof errorData.msg === 'string') {
+                // 匹配时间格式：2025-10-16 19:53:36 UTC+8
+                const timeMatch = errorData.msg.match(
+                  /(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC\+(\d+)/
+                )
+                if (timeMatch) {
+                  const [, timeStr, offsetHours] = timeMatch
+                  const resetTime = new Date(`${timeStr}+0${offsetHours}:00`)
+                  const now = new Date()
+                  resetsInSeconds = Math.max(
+                    0,
+                    Math.ceil((resetTime.getTime() - now.getTime()) / 1000)
+                  )
+                  logger.info(
+                    `🕐 Claude-OpenAI rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes)`
+                  )
+                }
+              }
+
+              if (!resetsInSeconds && errorData.resets_in_seconds) {
+                resetsInSeconds = errorData.resets_in_seconds
+              }
+            }
+
+            if (!resetsInSeconds) {
+              logger.warn(
+                '⚠️ Could not extract reset time from 429 response, using default 60 minutes'
+              )
+            }
+          } catch (parseError) {
+            logger.error('⚠️ Failed to parse rate limit error:', parseError)
+          }
+
+          // 标记账户为限流状态
+          try {
+            await unifiedOpenAIScheduler.markAccountRateLimited(
+              accountId,
+              accountType,
+              null, // sessionHash - 流式请求通常不需要会话映射
+              resetsInSeconds
+            )
+            logger.info(`✅ Marked OpenAI account ${accountId} as rate limited`)
+          } catch (markError) {
+            logger.error('❌ Failed to mark account as rate limited:', markError)
           }
         }
 
@@ -405,6 +475,15 @@ async function handleMessagesRequest(req, res, apiKeyData) {
           )
         }
 
+        // 请求成功，检查并移除限流状态
+        const isRateLimited = await unifiedOpenAIScheduler.isAccountRateLimited(accountId)
+        if (isRateLimited) {
+          logger.info(
+            `✅ Removing rate limit for OpenAI account ${accountId} after successful Claude-OpenAI request`
+          )
+          await unifiedOpenAIScheduler.removeAccountRateLimit(accountId, accountType)
+        }
+
         // 返回 Claude 格式响应
         res.json(claudeResponse)
 
@@ -419,6 +498,68 @@ async function handleMessagesRequest(req, res, apiKeyData) {
           error: {
             type: 'api_error',
             message: 'Failed to connect to OpenAI API'
+          }
+        }
+
+        // 处理 429 限流错误
+        if (status === 429) {
+          logger.warn(
+            `🚫 Rate limit detected for OpenAI account ${accountId} (Claude-OpenAI non-stream)`
+          )
+
+          // 解析响应体中的限流信息
+          let resetsInSeconds = null
+          let errorData = null
+
+          try {
+            if (error.body) {
+              errorData = JSON.parse(error.body)
+
+              // 解析重置时间 - 支持多种格式
+              if (errorData.msg && typeof errorData.msg === 'string') {
+                // 匹配时间格式：2025-10-16 19:53:36 UTC+8
+                const timeMatch = errorData.msg.match(
+                  /(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC\+(\d+)/
+                )
+                if (timeMatch) {
+                  const [, timeStr, offsetHours] = timeMatch
+                  const resetTime = new Date(`${timeStr}+0${offsetHours}:00`)
+                  const now = new Date()
+                  resetsInSeconds = Math.max(
+                    0,
+                    Math.ceil((resetTime.getTime() - now.getTime()) / 1000)
+                  )
+                  logger.info(
+                    `🕐 Claude-OpenAI rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes)`
+                  )
+                }
+              }
+
+              if (!resetsInSeconds && errorData.resets_in_seconds) {
+                resetsInSeconds = errorData.resets_in_seconds
+              }
+            }
+
+            if (!resetsInSeconds) {
+              logger.warn(
+                '⚠️ Could not extract reset time from 429 response, using default 60 minutes'
+              )
+            }
+          } catch (parseError) {
+            logger.error('⚠️ Failed to parse rate limit error:', parseError)
+          }
+
+          // 标记账户为限流状态
+          try {
+            await unifiedOpenAIScheduler.markAccountRateLimited(
+              accountId,
+              accountType,
+              null, // sessionHash - 非流式请求通常不需要会话映射
+              resetsInSeconds
+            )
+            logger.info(`✅ Marked OpenAI account ${accountId} as rate limited`)
+          } catch (markError) {
+            logger.error('❌ Failed to mark account as rate limited:', markError)
           }
         }
 
