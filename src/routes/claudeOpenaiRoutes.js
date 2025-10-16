@@ -13,9 +13,9 @@ const unifiedOpenAIScheduler = require('../services/unifiedOpenAIScheduler')
 const openaiAccountService = require('../services/openaiAccountService')
 const openaiResponsesAccountService = require('../services/openaiResponsesAccountService')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
-const https = require('https')
-const http = require('http')
-const { URL } = require('url')
+const axios = require('axios')
+const ProxyHelper = require('../utils/proxyHelper')
+const config = require('../../config/config')
 
 // 🔧 辅助函数：检查 API Key 权限
 function checkPermissions(apiKeyData, requiredPermission = 'openai') {
@@ -46,51 +46,79 @@ function queueRateLimitUpdate(rateLimitInfo, usageSummary, model, context = '') 
 
 // 🔧 发送请求到 OpenAI API
 async function sendToOpenAI(openaiRequest, accountData, isStream = false) {
-  return new Promise((resolve, reject) => {
-    // OpenAI Responses 账户使用 baseApi 字段，标准 OpenAI 账户使用 apiUrl 字段
-    const apiUrl = accountData.baseApi || accountData.apiUrl || 'https://api.openai.com'
-    const url = new URL(`${apiUrl}/chat/completions`)
+  const apiUrl = accountData.baseApi || accountData.apiUrl || 'https://api.openai.com'
+  const targetUrl = `${apiUrl.replace(/\/$/, '')}/chat/completions`
 
-    const requestOptions = {
-      hostname: url.hostname,
-      port: url.port || (url.protocol === 'https:' ? 443 : 80),
-      path: url.pathname,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${accountData.apiKey}`,
-        'User-Agent': accountData.userAgent || 'crs/1.0'
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${accountData.apiKey}`,
+    'User-Agent': accountData.userAgent || 'crs/1.0'
+  }
+
+  const requestOptions = {
+    method: 'POST',
+    url: targetUrl,
+    headers,
+    data: openaiRequest,
+    timeout: (config && config.requestTimeout) || 600000,
+    responseType: isStream ? 'stream' : 'json',
+    validateStatus: () => true
+  }
+
+  if (accountData.proxy) {
+    const proxyAgent = ProxyHelper.createProxyAgent(accountData.proxy)
+    if (proxyAgent) {
+      requestOptions.httpsAgent = proxyAgent
+      requestOptions.proxy = false
+    }
+  }
+
+  try {
+    const response = await axios(requestOptions)
+
+    if (isStream) {
+      if (response.status >= 400) {
+        const chunks = []
+        await new Promise((resolve) => {
+          response.data.on('data', (chunk) => chunks.push(chunk))
+          response.data.on('end', resolve)
+          response.data.on('error', resolve)
+          setTimeout(resolve, 5000)
+        })
+
+        const body = Buffer.concat(chunks).toString()
+        const error = new Error('OpenAI stream request failed')
+        error.status = response.status
+        error.headers = response.headers
+        error.body = body
+        throw error
       }
+
+      return response.data
     }
 
-    const client = url.protocol === 'https:' ? https : http
-    const req = client.request(requestOptions, (res) => {
-      if (isStream) {
-        // 流式响应直接返回响应对象
-        resolve(res)
-      } else {
-        // 非流式响应收集完整数据
-        let data = ''
-        res.on('data', (chunk) => {
-          data += chunk
-        })
-        res.on('end', () => {
-          resolve({
-            statusCode: res.statusCode,
-            headers: res.headers,
-            body: data
-          })
-        })
-      }
-    })
+    const body =
+      typeof response.data === 'string' ? response.data : JSON.stringify(response.data)
 
-    req.on('error', (error) => {
-      reject(error)
-    })
+    return {
+      statusCode: response.status,
+      headers: response.headers,
+      body
+    }
+  } catch (error) {
+    if (error.response) {
+      const errorBody =
+        typeof error.response.data === 'string'
+          ? error.response.data
+          : JSON.stringify(error.response.data)
 
-    req.write(JSON.stringify(openaiRequest))
-    req.end()
-  })
+      error.status = error.response.status
+      error.headers = error.response.headers
+      error.body = errorBody
+    }
+
+    throw error
+  }
 }
 
 // 🔧 处理消息请求的核心函数
@@ -285,13 +313,34 @@ async function handleMessagesRequest(req, res, apiKeyData) {
         })
       } catch (error) {
         logger.error('❌ Failed to initiate OpenAI stream:', error)
-        res.status(500).json({
+
+        const status = error.status || error.response?.status || 500
+        let errorPayload = {
           type: 'error',
           error: {
             type: 'api_error',
             message: 'Failed to connect to OpenAI API'
           }
-        })
+        }
+
+        if (error.body) {
+          try {
+            const parsed = JSON.parse(error.body)
+            if (parsed && typeof parsed === 'object') {
+              errorPayload = parsed
+            }
+          } catch (_) {
+            errorPayload.error.message = error.body
+          }
+        } else if (error.message) {
+          errorPayload.error.message = error.message
+        }
+
+        if (!res.headersSent) {
+          res.status(status).json(errorPayload)
+        } else {
+          res.end()
+        }
       }
     } else {
       // 非流式请求
@@ -363,13 +412,30 @@ async function handleMessagesRequest(req, res, apiKeyData) {
         logger.info(`✅ Claude-OpenAI request completed in ${duration}ms`)
       } catch (error) {
         logger.error('❌ Failed to send request to OpenAI:', error)
-        res.status(500).json({
+
+        const status = error.status || error.response?.status || 500
+        let errorPayload = {
           type: 'error',
           error: {
             type: 'api_error',
             message: 'Failed to connect to OpenAI API'
           }
-        })
+        }
+
+        if (error.body) {
+          try {
+            const parsed = JSON.parse(error.body)
+            if (parsed && typeof parsed === 'object') {
+              errorPayload = parsed
+            }
+          } catch (_) {
+            errorPayload.error.message = error.body
+          }
+        } else if (error.message) {
+          errorPayload.error.message = error.message
+        }
+
+        return res.status(status).json(errorPayload)
       }
     }
   } catch (error) {
