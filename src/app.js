@@ -260,6 +260,7 @@ class Application {
       this.app.use('/api', apiRoutes)
       this.app.use('/api', unifiedRoutes) // 统一智能路由（支持 /v1/chat/completions 等）
       this.app.use('/claude', apiRoutes) // /claude 路由别名，与 /api 功能相同
+      this.app.use('/claude/openai', claudeOpenaiRoutes)
       this.app.use('/admin', adminRoutes)
       this.app.use('/users', userRoutes)
       // 使用 web 路由（包含 auth 和页面重定向）
@@ -271,7 +272,6 @@ class Application {
       this.app.use('/openai/gemini', openaiGeminiRoutes)
       this.app.use('/openai/claude', openaiClaudeRoutes)
       this.app.use('/openai', unifiedRoutes) // 复用统一智能路由，支持 /openai/v1/chat/completions
-      this.app.use('/claude/openai', claudeOpenaiRoutes)
       this.app.use('/openai', openaiRoutes) // Codex API 路由（/openai/responses, /openai/v1/responses）
       // Droid 路由：支持多种 Factory.ai 端点
       this.app.use('/droid', droidRoutes) // Droid (Factory.ai) API 转发
