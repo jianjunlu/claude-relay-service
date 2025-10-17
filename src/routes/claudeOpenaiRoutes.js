@@ -264,7 +264,7 @@ async function handleMessagesRequest(req, res, apiKeyData) {
           }
         })
 
-        openaiStream.on('end', async () => {
+        openaiStream.on('end', () => {
           // 确保发送 message_stop 事件
           res.write('event: message_stop\n')
           res.write('data: {"type":"message_stop"}\n\n')
@@ -296,14 +296,20 @@ async function handleMessagesRequest(req, res, apiKeyData) {
             )
           }
 
-          // 请求成功，检查并移除限流状态
-          const isRateLimited = await unifiedOpenAIScheduler.isAccountRateLimited(accountId)
-          if (isRateLimited) {
-            logger.info(
-              `✅ Removing rate limit for OpenAI account ${accountId} after successful Claude-OpenAI stream`
-            )
-            await unifiedOpenAIScheduler.removeAccountRateLimit(accountId, accountType)
-          }
+          // 请求成功，检查并移除限流状态（使用 then/catch 避免阻塞）
+          unifiedOpenAIScheduler
+            .isAccountRateLimited(accountId)
+            .then((isRateLimited) => {
+              if (isRateLimited) {
+                logger.info(
+                  `✅ Removing rate limit for OpenAI account ${accountId} after successful Claude-OpenAI stream`
+                )
+                return unifiedOpenAIScheduler.removeAccountRateLimit(accountId, accountType)
+              }
+            })
+            .catch((error) => {
+              logger.error(`❌ Failed to check/remove rate limit for account ${accountId}:`, error)
+            })
 
           const duration = Date.now() - startTime
           logger.info(`✅ Claude-OpenAI stream request completed in ${duration}ms`)
